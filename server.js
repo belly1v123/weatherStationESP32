@@ -45,6 +45,18 @@ function getDeviceStatus() {
   return { lastSeen: last.receivedAt, online };
 }
 
+function computeSeaLevelPressure(p_hpa, altitude_m) {
+  // p_hpa: measured absolute pressure in hPa
+  // altitude_m: meters above sea level
+  if (typeof p_hpa !== 'number') return null;
+  if (!isFinite(p_hpa) || p_hpa <= 0) return null;
+  const exponent = 5.255;
+  const ratio = 1.0 - (altitude_m / 44330.0);
+  if (ratio <= 0) return null;
+  const sea = p_hpa / Math.pow(ratio, exponent);
+  return sea;
+}
+
 // Accept POST from ESP32
 app.post('/api/data', (req, res) => {
   const payload = req.body;
@@ -61,6 +73,20 @@ app.post('/api/data', (req, res) => {
   }
   console.log(`Received: ${kathmanduTime}  payload:`, payload);
 
+  // Compute authoritative sea-level pressure on server using stored altitude
+  try {
+    const p = parseFloat(payload.bmp_pressure);
+    if (!isNaN(p) && isFinite(p) && p > 0) {
+      const sl = computeSeaLevelPressure(p, config.altitude_m);
+      if (sl && isFinite(sl)) {
+        // round to 2 decimal places for storage/display
+        payload.bmp_sealevel = Math.round(sl * 100) / 100;
+      }
+    }
+  } catch (e) {
+    // ignore and keep whatever was provided
+  }
+
   recentData.push(payload);
   if (recentData.length > MAX_STORE) recentData.shift();
 
@@ -71,7 +97,8 @@ app.post('/api/data', (req, res) => {
   // Broadcast current config too (help clients stay in sync)
   io.emit('config', config);
 
-  res.json({ status: 'ok' });
+  // Include current config in the response so devices can pick up changes
+  res.json({ status: 'ok', config });
 });
 
 // API to get recent data
@@ -101,6 +128,16 @@ app.post('/api/config', (req, res) => {
     console.error('Failed to write config.json', e);
   }
   res.json(config);
+});
+
+// Lightweight API to request an immediate config broadcast (useful for the dashboard "Push now")
+app.post('/api/push', (req, res) => {
+  try {
+    io.emit('config', config);
+    res.json({ status: 'ok', config });
+  } catch (e) {
+    res.status(500).json({ status: 'error', error: String(e) });
+  }
 });
 
 // Socket handlers

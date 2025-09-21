@@ -6,6 +6,7 @@
 #include <Adafruit_BMP085.h> // for BMP180/BMP085
 #include <DHT.h>
 #include <Adafruit_SSD1306.h>
+#include <ArduinoJson.h>
 
 // --- CONFIG ---
 const char *WIFI_SSID = "Pranjal_2.4";
@@ -48,7 +49,8 @@ float altitude_m = 1350.0; // set to your location altitude; will be updated fro
 
 // Config fetch timing
 unsigned long lastConfigFetchMs = 0;
-const unsigned long CONFIG_FETCH_INTERVAL_MS = 60UL * 60UL * 1000UL; // 1 hour
+// Poll server config every 5 minutes to pick up dashboard changes quickly
+const unsigned long CONFIG_FETCH_INTERVAL_MS = 5UL * 60UL * 1000UL; // 5 minutes
 
 void fetchConfigFromServer()
 {
@@ -61,27 +63,25 @@ void fetchConfigFromServer()
   if (code == 200)
   {
     String body = http.getString();
-    // crude parse for altitude_m (keep deps small)
-    int idx = body.indexOf("altitude_m");
-    if (idx >= 0)
+    // parse JSON using ArduinoJson
+    StaticJsonDocument<256> doc;
+    DeserializationError err = deserializeJson(doc, body);
+    if (!err)
     {
-      int colon = body.indexOf(':', idx);
-      if (colon >= 0)
+      if (doc.containsKey("altitude_m"))
       {
-        int comma = body.indexOf(',', colon);
-        String numstr;
-        if (comma > colon)
-          numstr = body.substring(colon + 1, comma);
-        else
-          numstr = body.substring(colon + 1);
-        numstr.trim();
-        float v = numstr.toFloat();
+        float v = doc["altitude_m"] | altitude_m;
         if (v > -500 && v < 10000)
         {
           altitude_m = v;
-          Serial.printf("Config: altitude_m=%.1f\n", altitude_m);
+          Serial.printf("Config fetched: altitude_m=%.1f\n", altitude_m);
         }
       }
+    }
+    else
+    {
+      Serial.print("Config JSON parse error: ");
+      Serial.println(err.c_str());
     }
   }
   http.end();
@@ -165,21 +165,7 @@ void checkWiFiReconnect()
 // === Sensors ===
 float readBMPTemperature() { return bmp.readTemperature() + BMP_TEMP_OFFSET; }
 float readBMPPressure() { return bmp.readPressure() / 100.0F; } // Absolute pressure
-float readBMPSeaLevelPressure()
-{
-  // Use measured absolute pressure (hPa) and convert to sea-level pressure
-  // using the barometric formula approximation:
-  // P0 = P / (1 - h/44330.0)^5.255
-  float p_hpa = readBMPPressure();
-  if (isnan(p_hpa) || p_hpa <= 0)
-    return NAN;
-  const float exponent = 5.255;
-  float ratio = 1.0 - (altitude_m / 44330.0);
-  if (ratio <= 0)
-    return NAN;
-  float seaLevel = p_hpa / pow(ratio, exponent);
-  return seaLevel;
-}
+// Sea-level pressure is computed on the server. Device no longer computes it.
 float readDHTTemp()
 {
   unsigned long now = millis();
@@ -199,14 +185,13 @@ float readDHTHum() { return lastValidDHTHum; }
 int readMQ135Raw() { return analogRead(MQ135_PIN); }
 
 // === Data / HTTP ===
-String postJSON(float bmpT, float bmpP, float bmpSeaP, float dhtT, float dhtH, int mqRaw)
+String postJSON(float bmpT, float bmpP, float dhtT, float dhtH, int mqRaw)
 {
   float chosenTemp = bmpT;
   String payload = "{";
   payload += "\"timestamp\":" + String(millis()) + ",";
   payload += "\"bmp_temp\":" + String(bmpT, 2) + ",";
   payload += "\"bmp_pressure\":" + String(bmpP, 2) + ",";
-  payload += "\"bmp_sealevel\":" + String(bmpSeaP, 2) + ",";
   if (isnan(dhtT))
     payload += "\"dht_temp\":null,";
   else
@@ -238,7 +223,31 @@ bool sendDataToServer(const String &jsonPayload)
   int httpCode = http.POST(jsonPayload);
   if (httpCode > 0)
   {
-    Serial.printf("POST %d -> %s\n", httpCode, http.getString().c_str());
+    String resp = http.getString();
+    Serial.printf("POST %d -> %s\n", httpCode, resp.c_str());
+    // If server returned a config object, parse it and apply immediately
+    if (resp.length() > 0)
+    {
+      StaticJsonDocument<256> doc;
+      DeserializationError err = deserializeJson(doc, resp);
+      if (!err && doc.containsKey("config"))
+      {
+        JsonObject c = doc["config"].as<JsonObject>();
+        if (c.containsKey("altitude_m"))
+        {
+          float v = c["altitude_m"] | altitude_m;
+          if (v > -500 && v < 10000)
+          {
+            altitude_m = v;
+            Serial.printf("Config from POST: altitude_m=%.1f\n", altitude_m);
+          }
+        }
+      }
+      else if (err)
+      {
+        // non-fatal: server may return a simple {status:'ok'}
+      }
+    }
     http.end();
     indicateStatusWifiConnected();
     return (httpCode >= 200 && httpCode < 300);
@@ -253,7 +262,7 @@ bool sendDataToServer(const String &jsonPayload)
 }
 
 // === Display ===
-void updateOLED(float bmpT, float bmpP, float bmpSeaP, float dhtT, float dhtH, int mqRaw)
+void updateOLED(float bmpT, float bmpP, float dhtT, float dhtH, int mqRaw)
 {
   display.clearDisplay();
   display.setTextSize(1);
@@ -280,25 +289,19 @@ void updateOLED(float bmpT, float bmpP, float bmpSeaP, float dhtT, float dhtH, i
   else
     display.print("BMP P:---.-- hPa");
 
-  display.setCursor(0, 44);
-  if (!isnan(bmpSeaP))
-    display.printf("SL P:%6.1f hPa", bmpSeaP);
-  else
-    display.print("SL P:---.-- hPa");
-
   display.setCursor(0, 54);
   display.printf("MQ:%5d", mqRaw);
   display.display();
 }
 
 // === Optional: Update Serial Print ===
-void printSensorStatus(float bmpT, float bmpP, float bmpSeaP, float dhtT, float dhtH, int mqRaw)
+void printSensorStatus(float bmpT, float bmpP, float dhtT, float dhtH, int mqRaw)
 {
   unsigned long s = millis() / 1000;
-  Serial.printf("[Uptime %lus] WiFi:%s | BMP T:%.2fC | BMP P:%.1f hPa | SL P:%.1f hPa | DHT T:%.2fC H:%.1f%% | MQ:%d\n",
+  Serial.printf("[Uptime %lus] WiFi:%s | BMP T:%.2fC | BMP P:%.1f hPa | DHT T:%.2fC H:%.1f%% | MQ:%d\n",
                 s,
                 WiFi.status() == WL_CONNECTED ? "OK" : "OFF",
-                bmpT, bmpP, bmpSeaP,
+                bmpT, bmpP,
                 isnan(dhtT) ? -99.0 : dhtT,
                 isnan(dhtH) ? -99.0 : dhtH,
                 mqRaw);
@@ -334,20 +337,19 @@ void loop()
 {
   float bmpT = readBMPTemperature();
   float bmpP = readBMPPressure();
-  float bmpSeaP = readBMPSeaLevelPressure(); // new
   float dhtT = readDHTTemp();
   float dhtH = readDHTHum();
   int mq = readMQ135Raw();
 
-  updateOLED(bmpT, bmpP, bmpSeaP, dhtT, dhtH, mq);
-  printSensorStatus(bmpT, bmpP, bmpSeaP, dhtT, dhtH, mq); // updated to include sea-level
+  updateOLED(bmpT, bmpP, dhtT, dhtH, mq);
+  printSensorStatus(bmpT, bmpP, dhtT, dhtH, mq);
   checkWiFiReconnect();
 
   unsigned long now = millis();
   if (wifiConnected && now - lastPost >= POST_INTERVAL_MS)
   {
     lastPost = now;
-    String payload = postJSON(bmpT, bmpP, bmpSeaP, dhtT, dhtH, mq);
+    String payload = postJSON(bmpT, bmpP, dhtT, dhtH, mq);
     if (!sendDataToServer(payload))
       Serial.println("Send failed");
   }

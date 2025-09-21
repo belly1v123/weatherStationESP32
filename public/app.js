@@ -165,6 +165,18 @@ function App() {
                         }
                     }
                 }, 'Save')
+                ,
+                e('button', {
+                    onClick: async () => {
+                        try {
+                            // Hit server push endpoint which will broadcast config to clients
+                            const res = await fetch('/api/push', { method: 'POST' });
+                            const json = await res.json();
+                            console.log('Push result', json);
+                        } catch (e) { console.error('Push failed', e); }
+                    },
+                    title: 'Request server to broadcast current config to connected devices immediately'
+                }, 'Push now')
             ),
             e('div', { style: { marginTop: 8, color: '#475569' } }, `Current: ${config.altitude_m} m`)
         ),
