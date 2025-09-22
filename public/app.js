@@ -12,6 +12,9 @@ function App() {
     const humInstanceRef = React.useRef(null);
     const presInstanceRef = React.useRef(null);
     const mqInstanceRef = React.useRef(null);
+    const modalRef = React.useRef(null);
+    const modalCanvasRef = React.useRef(null);
+    const modalChartRef = React.useRef(null);
 
     React.useEffect(() => {
         const socket = io();
@@ -92,6 +95,18 @@ function App() {
             options: { animation: false, responsive: true, maintainAspectRatio: false, plugins: { legend: { display: true, position: 'top', labels: { boxWidth: 18, usePointStyle: true } } }, scales: { x: { display: false }, y: { grid: { color: 'rgba(0,0,0,0.06)' }, ticks: { color: 'rgba(15,23,32,0.65)' } } } }
         });
 
+        // attach click handlers to open fullscreen modal
+        const attachOpen = (id, chartRef) => {
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.style.cursor = 'pointer';
+            el.addEventListener('click', () => openChartModal(chartRef));
+        };
+        attachOpen('tempChart', chartInstanceRef);
+        attachOpen('humChart', humInstanceRef);
+        attachOpen('presChart', presInstanceRef);
+        attachOpen('mqChart', mqInstanceRef);
+
         return () => {
             chartInstanceRef.current && chartInstanceRef.current.destroy();
             humInstanceRef.current && humInstanceRef.current.destroy();
@@ -99,6 +114,44 @@ function App() {
             mqInstanceRef.current && mqInstanceRef.current.destroy();
         };
     }, []);
+
+    // Modal open/close helpers
+    const openChartModal = (chartRef) => {
+        try {
+            const modal = document.getElementById('chartModal');
+            const canvas = document.getElementById('modalChart');
+            if (!modal || !canvas) return;
+            // destroy previous modal chart
+            if (modalChartRef.current) { modalChartRef.current.destroy(); modalChartRef.current = null; }
+            // clone data & options
+            const src = chartRef.current;
+            if (!src) return;
+            // open modal first so canvas gets layout
+            modal.classList.add('open');
+            // build a minimal config from the live chart's data/options
+            const cfg = {
+                type: src.config && src.config.type ? src.config.type : (src.type || 'line'),
+                data: JSON.parse(JSON.stringify(src.data || src.config.data || {})),
+                options: JSON.parse(JSON.stringify(src.options || src.config.options || {}))
+            };
+            // create chart instance
+            modalChartRef.current = new Chart(canvas.getContext('2d'), cfg);
+            // allow the browser a frame to resize the canvas, then update/resize the chart
+            setTimeout(() => {
+                try { modalChartRef.current.resize(); modalChartRef.current.update(); } catch (e) { /* ignore */ }
+            }, 80);
+            // handle ESC to close
+            const escHandler = (ev) => { if (ev.key === 'Escape') closeChartModal(); };
+            document.addEventListener('keydown', escHandler, { once: true });
+        } catch (e) { console.error('Open modal failed', e); }
+    };
+
+    const closeChartModal = () => {
+        const modal = document.getElementById('chartModal');
+        if (!modal) return;
+        modal.classList.remove('open');
+        if (modalChartRef.current) { modalChartRef.current.destroy(); modalChartRef.current = null; }
+    };
 
     // Update charts when data changes
     React.useEffect(() => {
@@ -139,6 +192,13 @@ function App() {
     })();
 
     return e('div', { className: 'container' },
+        // Modal for fullscreen charts
+        e('div', { id: 'chartModal', className: 'chart-modal', onClick: (ev) => { if (ev.target.id === 'chartModal') closeChartModal(); } },
+            e('div', { className: 'modal-card' },
+                e('div', { className: 'modal-header' }, e('div', null, e('strong', null, 'Fullscreen Chart')), e('button', { className: 'close-btn', onClick: closeChartModal }, 'Close')),
+                e('div', { className: 'modal-body' }, e('canvas', { id: 'modalChart' }))
+            )
+        ),
         e('header', { className: 'header' },
             e('h2', { className: 'title' }, 'ESP32 Weather Dashboard'),
             e('div', { className: 'badges' },

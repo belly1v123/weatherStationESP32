@@ -105,6 +105,70 @@ canvas {
     height: 220px !important;
 }
 
+/* Make charts feel clickable */
+.chart-card canvas,
+.chart-main canvas {
+    cursor: pointer;
+}
+
+/* Fullscreen modal for charts */
+.chart-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(2, 6, 23, 0.6);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 2000;
+    padding: 24px;
+}
+
+.chart-modal.open {
+    display: flex;
+}
+
+.chart-modal .modal-card {
+    width: 100%;
+    max-width: 1200px;
+    height: 90vh;
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 12px 40px rgba(2, 6, 23, 0.3);
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+}
+
+.chart-modal .modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    border-bottom: 1px solid #eef2f7;
+}
+
+.chart-modal .modal-body {
+    flex: 1;
+    display: flex;
+    align-items: stretch;
+    padding: 12px;
+}
+
+.chart-modal canvas {
+    width: 100% !important;
+    height: 100% !important;
+}
+
+.chart-modal .close-btn {
+    background: #ef4444;
+    color: #fff;
+    border: none;
+    padding: 8px 12px;
+    border-radius: 8px;
+    cursor: pointer
+}
+
+
 @media (max-width:900px) {
     canvas {
         height: 180px !important;
