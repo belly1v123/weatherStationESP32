@@ -93,6 +93,18 @@ unsigned long lastDHTReadMs = 0;
 float lastValidDHTTemp = NAN;
 float lastValidDHTHum = NAN;
 
+// MQ sensor smoothing and calibration
+float mqEma = NAN;
+const float MQ_EMA_ALPHA = 0.2; // smoothing factor (0..1)
+const float MQ_VREF = 3.3;
+const int MQ_ADC_MAX = 4095;
+// simple environmental correction factors (empirical)
+const float MQ_HUM_FACTOR = 0.5;  // adjust baseline per %RH
+const float MQ_TEMP_FACTOR = 1.0; // adjust baseline per degC
+// thresholds (ADC raw after correction/EMA)
+const int MQ_GOOD_THRESHOLD = 420;
+const int MQ_MODERATE_THRESHOLD = 520; // treat >520 as poor
+
 // === Helpers ===
 void setRGB(uint8_t r, uint8_t g, uint8_t b)
 {
@@ -184,24 +196,40 @@ float readDHTTemp()
 float readDHTHum() { return lastValidDHTHum; }
 int readMQ135Raw() { return analogRead(MQ135_PIN); }
 
+// Convert ADC raw to volts
+float mqRawToVolts(int raw)
+{
+  return (float)raw / (float)MQ_ADC_MAX * MQ_VREF;
+}
+
+// Compute corrected MQ baseline using humidity and temperature
+float mqApplyEnvCorrection(float raw, float tempC, float humPercent)
+{
+  if (!isfinite(raw))
+    return raw;
+  float corr = raw;
+  if (isfinite(humPercent))
+    corr -= (humPercent - 50.0) * MQ_HUM_FACTOR;
+  if (isfinite(tempC))
+    corr -= (tempC - 25.0) * MQ_TEMP_FACTOR;
+  if (corr < 0)
+    corr = 0;
+  return corr;
+}
+
 // === Data / HTTP ===
 String postJSON(float bmpT, float bmpP, float dhtT, float dhtH, int mqRaw)
 {
-  float chosenTemp = bmpT;
+  // Provide distinct temperature fields so server & dashboard don't mirror one value
+  // Keys: bmp_temp, dht_temp, humidity (DHT), pressure (absolute), mq135_adc
   String payload = "{";
-  payload += "\"timestamp\":" + String(millis()) + ",";
-  payload += "\"bmp_temp\":" + String(bmpT, 2) + ",";
-  payload += "\"bmp_pressure\":" + String(bmpP, 2) + ",";
-  if (isnan(dhtT))
-    payload += "\"dht_temp\":null,";
-  else
-    payload += "\"dht_temp\":" + String(dhtT, 2) + ",";
-  if (isnan(dhtH))
-    payload += "\"dht_hum\":null,";
-  else
-    payload += "\"dht_hum\":" + String(dhtH, 1) + ",";
-  payload += "\"chosen_temp\":" + String(chosenTemp, 2) + ",";
-  payload += "\"mq_raw\":" + String(mqRaw);
+  unsigned long ts = (unsigned long)(millis() / 1000UL); // seconds since boot (server treats small numbers as relative)
+  payload += "\"timestamp\":" + String(ts) + ",";
+  payload += "\"bmp_temp\":" + (isnan(bmpT) ? String("null") : String(bmpT, 2)) + ",";
+  payload += "\"dht_temp\":" + (isnan(dhtT) ? String("null") : String(dhtT, 2)) + ",";
+  payload += "\"humidity\":" + (isnan(dhtH) ? String("null") : String(dhtH, 1)) + ",";
+  payload += "\"pressure\":" + (isnan(bmpP) ? String("null") : String(bmpP, 2)) + ",";
+  payload += "\"mq135_adc\":" + String(mqRaw);
   payload += "}";
   return payload;
 }
@@ -270,7 +298,7 @@ void updateOLED(float bmpT, float bmpP, float dhtT, float dhtH, int mqRaw)
   display.setTextWrap(false);
 
   display.setCursor(0, 0);
-  display.print("ESP32 Weather");
+  display.print("Sensors Readings");
 
   display.setCursor(0, 10);
   if (!isnan(bmpT))
@@ -288,8 +316,9 @@ void updateOLED(float bmpT, float bmpP, float dhtT, float dhtH, int mqRaw)
     display.printf("BMP P:%6.1f hPa", bmpP);
   else
     display.print("BMP P:---.-- hPa");
-
-  display.setCursor(0, 54);
+  display.setCursor(0, 44);
+  // Air health label will be painted by loop (we keep the OLED simple here)
+  display.setCursor(0, 55);
   display.printf("MQ:%5d", mqRaw);
   display.display();
 }
@@ -340,8 +369,42 @@ void loop()
   float dhtT = readDHTTemp();
   float dhtH = readDHTHum();
   int mq = readMQ135Raw();
+  // MQ processing: smoothing and environmental correction
+  float mqCorrected = mqApplyEnvCorrection((float)mq, dhtT, dhtH);
+  if (!isfinite(mqEma))
+    mqEma = mqCorrected;
+  else
+    mqEma = MQ_EMA_ALPHA * mqCorrected + (1 - MQ_EMA_ALPHA) * mqEma;
+
+  // Determine health
+  String airLabel = "Air: ?";
+  if (mqEma < MQ_GOOD_THRESHOLD)
+  {
+    // Good
+    setRGB(0, 200, 0);
+    airLabel = "Air: Good";
+  }
+  else if (mqEma < MQ_MODERATE_THRESHOLD)
+  {
+    // Moderate
+    setRGB(240, 200, 0);
+    airLabel = "Air: Moderate";
+  }
+  else
+  {
+    // Poor
+    setRGB(200, 0, 0);
+    airLabel = "Air: Poor";
+  }
 
   updateOLED(bmpT, bmpP, dhtT, dhtH, mq);
+  // repaint air label at top-right
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 45);
+  display.print(airLabel);
+  display.display();
+
   printSensorStatus(bmpT, bmpP, dhtT, dhtH, mq);
   checkWiFiReconnect();
 
